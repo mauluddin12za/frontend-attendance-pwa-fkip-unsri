@@ -1,66 +1,74 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
-import jwt from "jsonwebtoken";
+import { jwtVerify } from "jose";
 
-// Decode JWT and get user role (optional for now)
-function getRoleFromToken(token: string) {
-   try {
-      const decoded = jwt.decode(token) as { role: string };
-      return decoded.role;
-   } catch (error) {
-      console.error("Token decoding failed:", error);
-   }
+const secret = new TextEncoder().encode(process.env.JWT_ACCESS_SECRET!);
+
+// Verify token
+async function verifyToken(token: string) {
+  try {
+    const { payload } = await jwtVerify(token, secret);
+
+    return payload;
+  } catch (error) {
+    console.error("JWT verification failed:", error);
+
+    return null;
+  }
 }
 
-// Simple user-agent check for mobile devices
+// Detect mobile device
 function isMobileUserAgent(userAgent: string | null): boolean {
-   if (!userAgent) return false;
-   return /android|iphone|ipad|ipod|blackberry|windows phone|mobile/i.test(
-      userAgent
-   );
+  if (!userAgent) return false;
+
+  return /android|iphone|ipad|ipod|blackberry|windows phone|mobile/i.test(
+    userAgent,
+  );
 }
 
-export function middleware(req: NextRequest) {
-   const token = req.cookies.get("accessToken")?.value;
-   const isLoggedIn = !!token;
-   const { pathname } = req.nextUrl;
-   const userAgent = req.headers.get("user-agent");
+export async function middleware(req: NextRequest) {
+  const token = req.cookies.get("accessToken")?.value;
 
-   // Not logged in and trying to access protected routes
-   if (
-      !isLoggedIn &&
-      (pathname.startsWith("/administrator") || pathname.startsWith("/me"))
-   ) {
-      return NextResponse.redirect(new URL("/login", req.url));
-   }
+  const { pathname } = req.nextUrl;
 
-   // Logged in and trying to access login page
-   if (isLoggedIn && pathname === "/login") {
-      const redirectTo = isMobileUserAgent(userAgent)
-         ? "/me/home"
-         : "/administrator/dashboard";
-      return NextResponse.redirect(new URL(redirectTo, req.url));
-   }
+  const userAgent = req.headers.get("user-agent");
 
-   // If the path starts with '/administrator', check if the user is an admin
-   if (pathname.startsWith("/administrator")) {
-      if (!token) {
-         return NextResponse.redirect(new URL("/login", req.url)); // Redirect to login if no token
-      }
+  // IMPORTANT: await
+  const payload = token ? await verifyToken(token) : null;
 
-      const role = getRoleFromToken(token);
+  const isLoggedIn = !!payload;
 
-      // Check if the role is 'admin'
-      if (role !== "admin") {
-         return NextResponse.redirect(new URL("/unauthorized", req.url));
-      }
-   }
+  // Protected routes
+  if (
+    !isLoggedIn &&
+    (pathname.startsWith("/administrator") || pathname.startsWith("/me"))
+  ) {
+    const response = NextResponse.redirect(new URL("/login", req.url));
 
-   // Allow the request
-   return NextResponse.next();
+    response.cookies.delete("accessToken");
+
+    return response;
+  }
+
+  // Logged in user visiting login page
+  if (isLoggedIn && pathname === "/login") {
+    const redirectTo = isMobileUserAgent(userAgent)
+      ? "/me/home"
+      : "/administrator/dashboard";
+
+    return NextResponse.redirect(new URL(redirectTo, req.url));
+  }
+
+  // Admin protection
+  if (pathname.startsWith("/administrator")) {
+    if (payload?.role !== "admin") {
+      return NextResponse.redirect(new URL("/unauthorized", req.url));
+    }
+  }
+
+  return NextResponse.next();
 }
 
-// Middleware will match these routes
 export const config = {
-   matcher: ["/login", "/me/:path*", "/administrator/:path*"],
+  matcher: ["/login", "/me/:path*", "/administrator/:path*"],
 };
